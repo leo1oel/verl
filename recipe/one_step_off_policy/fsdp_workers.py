@@ -142,6 +142,8 @@ class DetachActorWorker(DetachSync):
         assert self._is_actor
         if hasattr(self, "_weights_info"):
             return self._weights_info
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if fsdp_version(self.actor_module_fsdp) == 1:
             from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 

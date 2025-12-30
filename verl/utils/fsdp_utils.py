@@ -186,8 +186,8 @@ def load_fsdp_model_to_gpu(model: FSDP):
     assert model._is_root, "Only support root model loading to GPU"
     device_id = get_device_id()
     for handle in model._all_handles:
-        if handle._offload_params:
-            continue
+        # Don't skip offload params - we need to load them for state_dict()
+        # Even if FSDP configured cpu_offload, we manually load to GPU here
         flat_param = handle.flat_param
         handle.flat_param_to(torch.device(f"{get_device_name()}:{device_id}"), non_blocking=True)
         # the following still keeps id(._local_shard) != id(.data)

@@ -569,8 +569,8 @@ class FSDPEngine(BaseEngine):
         """
         super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
-        if self.engine_config.forward_only:
-            # force cpu_offload
+        # Skip manual offload if FSDP cpu_offload handles it
+        if self.engine_config.forward_only and self.engine_config.param_offload:
             return
 
         device_name = get_device_name()
@@ -637,8 +637,9 @@ class FSDPEngine(BaseEngine):
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.module)
+        # Always load model to GPU before state_dict() since wake_up() calls to("cpu")
+        # Without this, state_dict() will fail with "Expects tensor to be on cuda:0, was on cpu"
+        load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 

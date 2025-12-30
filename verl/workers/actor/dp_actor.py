@@ -455,6 +455,83 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs, entropys, sum_pi_squareds
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_gradient_norms(self, data: DataProto) -> torch.Tensor:
+        """Compute exact gradient norms ||∇_θ log π(τ)||² for each trajectory.
+
+        This is required for the Exact Optimal Baseline (EOB) algorithm.
+        It computes the exact gradient norm by doing one forward + backward pass
+        per sample, which is N times more expensive than a standard forward pass.
+
+        Args:
+            data (DataProto): a DataProto containing keys:
+                ``input_ids``: tensor of shape [batch_size, sequence_length]
+                ``attention_mask``: tensor of shape [batch_size, sequence_length]
+                ``position_ids``: tensor of shape [batch_size, sequence_length]
+                ``responses``: tensor of shape [batch_size, response_length]
+                ``response_mask``: tensor of shape [batch_size, response_length]
+
+        Returns:
+            torch.Tensor: gradient norms squared [shape: (batch_size,)]
+        """
+        from verl.trainer.ppo.exact_optimal_baseline import compute_gradient_norms_for_batch
+
+        # Set model to train mode for gradient computation
+        self.actor_module.train()
+
+        temperature = data.meta_info.get("temperature", 1.0)
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+
+        # Move data to device
+        data = data.to(get_device_id())
+
+        # Extract tensors
+        input_ids = data.batch["input_ids"]
+        attention_mask = data.batch["attention_mask"]
+        position_ids = data.batch["position_ids"]
+        responses = data.batch["responses"]
+        response_mask = data.batch["response_mask"]
+
+        # Prepare multi-modal inputs if present
+        multi_modal_inputs = None
+        if has_multi_modal_inputs:
+            multi_modal_inputs = data.non_tensor_batch["multi_modal_inputs"]
+
+        # Define forward function for the model
+        def forward_fn(model, input_ids, attention_mask, position_ids, **kwargs):
+            # Handle FSDP wrapper if present
+            if isinstance(model, (FSDP, FSDPModule)):
+                actual_model = model
+            else:
+                actual_model = model
+
+            # Forward pass
+            output = actual_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                **kwargs,
+            )
+            return output.logits
+
+        # Compute gradient norms for each sample
+        gradient_norms_squared = compute_gradient_norms_for_batch(
+            model=self.actor_module,
+            forward_fn=forward_fn,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            responses=responses,
+            response_mask=response_mask,
+            temperature=temperature,
+            multi_modal_inputs=multi_modal_inputs,
+        )
+
+        # Clear any remaining gradients
+        self.actor_module.zero_grad()
+
+        return gradient_norms_squared
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()

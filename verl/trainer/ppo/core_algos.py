@@ -106,6 +106,7 @@ class AdvantageEstimator(str, Enum):
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
+    EXACT_OPTIMAL_BASELINE = "exact_optimal_baseline"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -1635,8 +1636,8 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
 
     """
     The expectation of k1 and k3 estimator is the expectaed value of KL, but the expected gradient of k1 and k3
-    estimator is not the expectaed gradient of KL. On the other hand k2 estimator gives right gradient estimator, 
-    so we use a straight through trick here if the kl_penalty method ends with '+', .e.g., k3+. 
+    estimator is not the expectaed gradient of KL. On the other hand k2 estimator gives right gradient estimator,
+    so we use a straight through trick here if the kl_penalty method ends with '+', .e.g., k3+.
     """
     backward_score = 0.5 * (logprob - ref_logprob).square()
 
@@ -1983,3 +1984,9 @@ def compute_policy_loss_bypass_mode(
     pg_metrics.update(rollout_metrics)
 
     return pg_loss, pg_metrics
+
+
+# Import and register exact optimal baseline
+from verl.trainer.ppo.exact_optimal_baseline import compute_exact_optimal_baseline_advantage
+
+register_adv_est(AdvantageEstimator.EXACT_OPTIMAL_BASELINE)(compute_exact_optimal_baseline_advantage)

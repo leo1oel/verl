@@ -1015,6 +1015,49 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="purple", role="compute_gradient_norms")
+    def compute_gradient_norms(self, data: DataProto):
+        """Compute exact gradient norms ||∇_θ log π(τ)||² for each trajectory.
+
+        This is required for the Exact Optimal Baseline (EOB) algorithm.
+        It computes the exact gradient norm by doing one forward + backward pass
+        per sample, which is N times more expensive than a standard forward pass.
+
+        Args:
+            data (DataProto): DataProto containing input_ids, attention_mask,
+                position_ids, responses, response_mask
+
+        Returns:
+            DataProto: contains 'gradient_norms_squared' tensor [shape: (bs,)]
+        """
+        assert self._is_actor
+
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        # Prepare data
+        data.meta_info["temperature"] = self.config.rollout.temperature
+
+        with self.ulysses_sharding_manager:
+            gradient_norms_squared = self.actor.compute_gradient_norms(data=data)
+            output = DataProto.from_dict(
+                tensors={"gradient_norms_squared": gradient_norms_squared},
+                meta_info={},
+            )
+
+        output = output.to("cpu")
+
+        # Reshard if needed
+        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
+            self.actor.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload actor model during compute_gradient_norms", logger=logger)
+
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
         if self._is_lora:

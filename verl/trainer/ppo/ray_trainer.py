@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
 from collections import defaultdict
@@ -65,6 +66,8 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -264,6 +267,26 @@ def compute_advantage(
             old_log_probs=data.batch["old_log_probs"],
             sum_pi_squared=data.batch["sum_pi_squared"],
             rollout_is_weights=rollout_is_weights,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.EXACT_OPTIMAL_BASELINE:
+        # Compute advantages using Exact Optimal Baseline (EOB)
+        # This requires pre-computed gradient norms from the actor
+
+        assert "gradient_norms_squared" in data.batch, (
+            "Exact Optimal Baseline requires gradient_norms_squared from actor. "
+            "Please ensure compute_gradient_norms() was called before compute_advantage(). "
+            "Set algorithm.adv_estimator=exact_optimal_baseline and the trainer will compute them."
+        )
+
+        from verl.trainer.ppo.exact_optimal_baseline import compute_exact_optimal_baseline_advantage
+
+        advantages, returns = compute_exact_optimal_baseline_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            gradient_norms_squared=data.batch["gradient_norms_squared"],
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1531,6 +1554,13 @@ class RayPPOTrainer:
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
+
+                        # For Exact Optimal Baseline (EOB), compute gradient norms first
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.EXACT_OPTIMAL_BASELINE:
+                            with marked_timer("compute_gradient_norms", timing_raw, color="purple"):
+                                # Compute gradient norms in actor worker
+                                grad_norms_output = self.actor_rollout_wg.compute_gradient_norms(batch)
+                                batch.batch["gradient_norms_squared"] = grad_norms_output.batch["gradient_norms_squared"]
 
                         batch = compute_advantage(
                             batch,

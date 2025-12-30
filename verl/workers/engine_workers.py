@@ -462,7 +462,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.actor.ppo_max_token_len_per_gpu is not None
             else:
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
-                assert self.config.rollout.ppo_micro_batch_size_per_gpu is not None
+                assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
 
             self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
@@ -518,6 +518,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="purple", role="compute_gradient_norms")
+    def compute_gradient_norms(self, data: TensorDict) -> TensorDict:
+        """Compute exact gradient norms ||∇_θ log π(τ)||² for each trajectory.
+
+        This is required for the Exact Optimal Baseline (EOB) algorithm.
+
+        NOTE: EOB is not yet supported with the new engine worker implementation.
+        To use EOB, please set `trainer.use_legacy_worker_impl=auto` or `enable`
+        in your config to use the FSDP workers implementation.
+        """
+        raise NotImplementedError(
+            "Exact Optimal Baseline (EOB) is not yet supported with engine_workers. "
+            "To use EOB with adv_estimator='exact_optimal_baseline', please set "
+            "`trainer.use_legacy_worker_impl=auto` or `trainer.use_legacy_worker_impl=enable` "
+            "in your config to use the fsdp_workers implementation which supports EOB."
+        )
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: TensorDict) -> TensorDict:
         output = self.actor.train_mini_batch(data=data)
@@ -565,8 +583,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done)
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 3. offload model to cpu
-        self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+        # 3. offload model to cpu (only if param_offload is enabled)
+        if self.actor.engine.is_param_offload_enabled:
+            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
         aggressive_empty_cache(force_sync=True)
 
         # 4. resume kv_cache
